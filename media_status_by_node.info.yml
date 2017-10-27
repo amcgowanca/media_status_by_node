@@ -1,0 +1,4 @@
+name: 'Media Status By Node'
+type: module
+description: 'Sets the (published) status of media entities based on referencing nodes.'
+core: '8.x'

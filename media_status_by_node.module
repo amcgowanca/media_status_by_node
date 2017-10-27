@@ -1,0 +1,84 @@
+<?php
+
+/**
+ * @file
+ * Sets the (published) status of media entities based on referencing nodes.
+ */
+
+use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\node\NodeInterface;
+
+/**
+ * Implements hook_entity_insert().
+ */
+function media_status_by_node_entity_insert(EntityInterface $entity) {
+  media_status_by_node_set_media_status($entity);
+}
+
+/**
+ * Implements hook_entity_update().
+ */
+function media_status_by_node_entity_update(EntityInterface $entity) {
+  // If the given entity is a node that has ever been published in the past, it
+  // is considered to have already been disclosed and thus is not touched here.
+  if ($entity instanceof NodeInterface && media_status_by_node_has_ever_been_published($entity)) {
+    return;
+  }
+
+  media_status_by_node_set_media_status($entity);
+}
+
+/**
+ * Determines whether a given node has ever been published before.
+ *
+ * @param \Drupal\node\NodeInterface $node
+ *   The node in question.
+ *
+ * @return bool
+ *   Returns TRUE if the given node has ever been published or FALSE if not.
+ */
+function media_status_by_node_has_ever_been_published(NodeInterface $node) {
+  $query = \Drupal::database()
+    ->select('node_field_revision', 'nfr')
+    ->fields('nfr');
+  $query->condition('nfr.status', 1);
+  $query->condition('nfr.nid', $node->id());
+  $query->condition('nfr.vid', $node->getRevisionId(), '<>');
+  return (bool) $query->execute()->fetchObject();
+}
+
+/**
+ * Sets the (published) status of media attached to a given entity.
+ *
+ * Sets the status of all directly attached media to the same status as the
+ * entity itself.
+ *
+ * @param \Drupal\Core\Entity\EntityInterface $entity
+ *   The entity in question.
+ *
+ * @throws \Drupal\Core\Entity\EntityStorageException
+ *   Throws an exception in case of failure to save a media entity.
+ */
+function media_status_by_node_set_media_status(EntityInterface $entity) {
+  if (!($entity instanceof ContentEntityInterface)) {
+    return;
+  }
+
+  // This should work with media entities provided by EITHER the Drupal core
+  // (>=8.4) Media (media) module OR the contributed Media Entity (media_entity)
+  // module, both of which have an entity type ID of "media".
+  /** @var \Drupal\media\Entity\Media[]|\Drupal\media_entity\MediaInterface[] $medias */
+  static $medias = [];
+  if ($entity->getEntityTypeId() == 'media' && !array_key_exists($entity->id(), $medias)) {
+    $medias[$entity->id()] = $entity;
+  }
+  /** @var \Drupal\node\NodeInterface $entity */
+  if ($entity->getEntityTypeId() == 'node') {
+    foreach ($medias as $media) {
+      $media->set('status', $entity->isPublished());
+      $media->save();
+    }
+    $medias = [];
+  }
+}
