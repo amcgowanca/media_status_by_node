@@ -1,0 +1,35 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the media_status_by_node module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function media_status_by_node_schema() {
+  $schema['media_status_by_node'] = [
+    'description' => 'Track which media entities are associated with which nodes.',
+    'fields' => [
+      'mid' => [
+        'description' => 'Media ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'nid' => [
+        'description' => 'Node ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+    ],
+    'primary key' => ['mid', 'nid'],
+    'indexes' => [
+      'mid' => ['mid'],
+      'nid' => ['nid'],
+    ],
+  ];
+  return $schema;
+}

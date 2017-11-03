@@ -5,8 +5,10 @@
  * Sets the (published) status of media entities based on referencing nodes.
  */
 
-use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\Component\Utility\Html;
 use Drupal\Core\Entity\EntityInterface;
+use Drupal\field\Entity\FieldStorageConfig;
+use Drupal\media\MediaInterface;
 use Drupal\node\NodeInterface;
 
 /**
@@ -26,6 +28,10 @@ function media_status_by_node_entity_update(EntityInterface $entity) {
     return;
   }
 
+  if ($entity instanceof MediaInterface && !media_status_by_node_is_real_media($entity)) {
+    return;
+  }
+
   media_status_by_node_set_media_status($entity);
 }
 
@@ -34,17 +40,21 @@ function media_status_by_node_entity_update(EntityInterface $entity) {
  *
  * @param \Drupal\node\NodeInterface $node
  *   The node in question.
+ * @param bool $exclude_current_revision
+ *   Whether or not to exclude the current revision. Defaults to TRUE.
  *
  * @return bool
  *   Returns TRUE if the given node has ever been published or FALSE if not.
  */
-function media_status_by_node_has_ever_been_published(NodeInterface $node) {
+function media_status_by_node_has_ever_been_published(NodeInterface $node, $exclude_current_revision = TRUE) {
   $query = \Drupal::database()
     ->select('node_field_revision', 'nfr')
     ->fields('nfr');
   $query->condition('nfr.status', 1);
   $query->condition('nfr.nid', $node->id());
-  $query->condition('nfr.vid', $node->getRevisionId(), '<>');
+  if ($exclude_current_revision) {
+    $query->condition('nfr.vid', $node->getRevisionId(), '<>');
+  }
   return (bool) $query->execute()->fetchObject();
 }
 
@@ -57,28 +67,124 @@ function media_status_by_node_has_ever_been_published(NodeInterface $node) {
  * @param \Drupal\Core\Entity\EntityInterface $entity
  *   The entity in question.
  *
- * @throws \Drupal\Core\Entity\EntityStorageException
- *   Throws an exception in case of failure to save a media entity.
+ * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
  */
 function media_status_by_node_set_media_status(EntityInterface $entity) {
-  if (!($entity instanceof ContentEntityInterface)) {
-    return;
-  }
-
-  // This should work with media entities provided by EITHER the Drupal core
-  // (>=8.4) Media (media) module OR the contributed Media Entity (media_entity)
-  // module, both of which have an entity type ID of "media".
-  /** @var \Drupal\media\Entity\Media[]|\Drupal\media_entity\MediaInterface[] $medias */
+  /** @var \Drupal\media\Entity\Media[] $medias */
   static $medias = [];
   if ($entity->getEntityTypeId() == 'media' && !array_key_exists($entity->id(), $medias)) {
     $medias[$entity->id()] = $entity;
   }
-  /** @var \Drupal\node\NodeInterface $entity */
-  if ($entity->getEntityTypeId() == 'node') {
+  /** @var NodeInterface $entity */
+  if ($entity->getEntityTypeId() == 'node' && !media_status_by_node_has_ever_been_published($entity)) {
+    /**
+     * @var string $field_name
+     * @var \Drupal\Core\Field\FieldItemListInterface $field
+     */
+    foreach ($entity as $field_name => $field) {
+      $storage_definition = $field->getFieldDefinition()
+        ->getFieldStorageDefinition();
+      if ($storage_definition instanceof FieldStorageConfig && $storage_definition->getTypeProvider() == 'text') {
+        foreach ($field->getValue() as $value) {
+          /** @var \Drupal\filter\Entity\FilterFormat $filter_format */
+          $filter_format = \Drupal::entityTypeManager()
+            ->getStorage('filter_format')
+            ->load($value['format']);
+          $filters = $filter_format->filters();
+          $filters->sort();
+          /** @var \Drupal\filter\Plugin\FilterInterface $filter */
+          foreach ($filters as $filter) {
+            // If this text area can have entities embedded, we want to manually
+            // extract the entities contained therein.
+            if ($filter->getPluginId() == 'entity_embed') {
+              $text = $value['value'];
+              if (strpos($text, 'data-entity-type') !== FALSE && (strpos($text, 'data-entity-embed-display') !== FALSE || strpos($text, 'data-view-mode') !== FALSE)) {
+                $dom = Html::load($text);
+                $xpath = new \DOMXPath($dom);
+
+                foreach ($xpath->query('//drupal-entity[@data-entity-type and (@data-entity-uuid or @data-entity-id) and (@data-entity-embed-display or @data-view-mode)]') as $node) {
+                  /** @var \DOMElement $node */
+                  $entity_type = $node->getAttribute('data-entity-type');
+                  if ($entity_type != 'media') {
+                    continue;
+                  }
+                  if ($id = $node->getAttribute('data-entity-uuid')) {
+                    $media = \Drupal::entityTypeManager()
+                      ->getStorage($entity_type)
+                      ->loadByProperties(['uuid' => $id]);
+                    $media = current($media);
+                  }
+                  else {
+                    $id = $node->getAttribute('data-entity-id');
+                    $media = \Drupal::entityTypeManager()
+                      ->getStorage($entity_type)
+                      ->load($id);
+                  }
+                  if ($media && !array_key_exists($media->id(), $medias)) {
+                    $medias[$media->id()] = $media;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     foreach ($medias as $media) {
+      media_status_by_node_add_related_node($media, $entity);
+      foreach (media_status_by_node_get_related_nodes($media) as $node_entity) {
+        if (media_status_by_node_has_ever_been_published($node_entity, $entity->id() == $node_entity->id())) {
+          continue 2;
+        }
+      }
       $media->set('status', $entity->isPublished());
       $media->save();
     }
     $medias = [];
   }
+}
+
+/**
+ * @param \Drupal\media\MediaInterface $entity
+ *
+ * @return bool
+ */
+function media_status_by_node_is_real_media(MediaInterface $entity) {
+  $media = \Drupal::entityTypeManager()
+    ->getStorage('media')
+    ->load($entity->id());
+  if ($media) {
+    return TRUE;
+  }
+  elseif ($entity->isNew()) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+function media_status_by_node_add_related_node(MediaInterface $media, NodeInterface $node) {
+  $nodes = media_status_by_node_get_related_nodes($media);
+  if (!isset($nodes[$node->id()])) {
+    \Drupal::database()->insert('media_status_by_node')
+      ->fields(['nid', 'mid'], [$node->id(), $media->id()])
+      ->execute();
+  }
+}
+
+function media_status_by_node_get_related_nodes(MediaInterface $media) {
+  $nodes = [];
+  $query = \Drupal::database()
+    ->select('media_status_by_node', 'msbn')
+    ->fields('msbn', ['nid']);
+  $query->condition('msbn.mid', $media->id());
+  $results = $query->execute();
+  foreach ($results as $result) {
+    $nodes[] = $result->nid;
+  }
+  if ($nodes) {
+    return \Drupal::entityTypeManager()
+      ->getStorage('node')
+      ->loadMultiple($nodes);
+  }
+  return [];
 }
